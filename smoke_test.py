@@ -135,6 +135,8 @@ def main():
 
     body = response.json()
 
+    assert "detail" in body
+    assert "error" in body["detail"]
     assert body["detail"]["field"] == "amount_inr"
     # Q6 — Missing required field
     missing_hour = {
@@ -229,11 +231,16 @@ def main():
         f"{BASE_URL}/case",
         json=outage,
     )
+
     print_result(
         "Q9",
         response,
     )
+
     assert response.status_code == 503
+    assert "detail" in response.json()
+    assert "error" in response.json()["detail"]
+
     benign_case = {
         **benign,
         "txn_id": "T800001",
@@ -242,16 +249,21 @@ def main():
             "from a new device"
         ),
     }
+
     response = requests.post(
         f"{BASE_URL}/case",
         json=benign_case,
     )
+
     print_result(
         "Q10",
         response,
     )
+
     assert response.status_code == 200
+
     result = response.json()
+
     assert result["case_note"] is None
     assert result["attempts"] == 0
     assert result["decision"] == "approve"
@@ -263,14 +275,17 @@ def main():
         "txn_id": "T800006",
         "question": "what is the cafeteria menu today",
     }
+
     response = requests.post(
         f"{BASE_URL}/case",
         json=out_of_scope,
     )
+
     print_result(
         "Q11",
         response,
     )
+
     assert response.status_code == 200
     result = response.json()
     assert result["case_note"] is None
@@ -279,7 +294,11 @@ def main():
     assert result["human_review"] is True
     print()
     print("=" * 100)
+    print("Happy:      3/3 passed (Q1, Q2, Q10)")
+    print("Escalation: 4/4 passed (Q3, Q4, Q7, Q8)")
+    print("Edge:       4/4 passed (Q5, Q6, Q9, Q11)")
     print("11/11 SMOKE TESTS PASSED")
+
 
 if __name__ == "__main__":
     main()
