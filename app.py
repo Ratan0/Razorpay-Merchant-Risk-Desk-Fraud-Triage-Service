@@ -18,13 +18,16 @@ app = FastAPI(
 )
 
 # MODEL
+
 MODEL_ARTIFACT = build_final_model()
 
 MODEL = MODEL_ARTIFACT["model"]
 MODEL_COLUMNS = MODEL_ARTIFACT["columns"]
 TRAINING_MEDIAN = MODEL_ARTIFACT["median"]
 THRESHOLD = MODEL_ARTIFACT["threshold"]
+
 # VALID VALUES
+
 VALID_CATEGORIES = {
     "Grocery",
     "Electronics",
@@ -33,6 +36,7 @@ VALID_CATEGORIES = {
     "Fashion",
     "Utilities",
 }
+
 VALID_CITIES = {
     "Pune",
     "Mumbai",
@@ -41,60 +45,79 @@ VALID_CITIES = {
     "Chennai",
     "Kolkata",
 }
+
 VALID_PAYMENT_MODES = {
     "UPI",
     "Card",
     "NetBanking",
     "Wallet",
 }
+
+
 # METRICS
+
 METRICS = {
     "requests_total": 0,
-    "post_requests": 0,
-    "errors_total": 0,
+    "success_total": 0,
+    "error_total": 0,
+    "human_review_total": 0,
     "latency_total_ms": 0.0,
     "latency_count": 0,
 }
 # LOGGING
+
 logger = logging.getLogger("fraud_triage")
+
 logger.setLevel(logging.INFO)
+
 file_handler = logging.FileHandler(
     "service.log",
-    mode="a",
+    mode="w",
     encoding="utf-8",
 )
+
 formatter = logging.Formatter(
     "%(asctime)s | %(levelname)s | %(message)s"
 )
+
 file_handler.setFormatter(formatter)
+
 logger.addHandler(file_handler)
+
+
 # PYDANTIC MODELS
+
 class Txn(BaseModel):
     txn_id: str
     customer_id: str
+
     merchant_category: str
     city: str
     payment_mode: str
+
     amount_inr: float
     hour_of_day: int
     txn_count_last_24h: int
     avg_amount_30d_inr: float
     distance_from_home_km: float | None = None
+
     is_new_device: int
     account_age_days: int
+
 
 class CaseIn(Txn):
     fraud_probability: float | None = None
     question: str
+
+
 # MIDDLEWARE
+
 @app.middleware("http")
-async def observability_middleware(
-    request: Request,
-    call_next,
-):
+async def observability_middleware(request: Request, call_next):
     start = time.perf_counter()
     response = None
     error = None
+
     try:
         response = await call_next(request)
         return response
@@ -102,41 +125,48 @@ async def observability_middleware(
         error = exc
         raise
     finally:
-        elapsed_ms = (
-            time.perf_counter() - start
-        ) * 1000
-        METRICS["requests_total"] += 1
-        METRICS["latency_total_ms"] += elapsed_ms
-        METRICS["latency_count"] += 1
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        # Assignment metrics/logs count POST requests only.
         if request.method == "POST":
-            METRICS["post_requests"] += 1
+            METRICS["requests_total"] += 1
+            METRICS["latency_total_ms"] += elapsed_ms
+            METRICS["latency_count"] += 1
+
             if error is not None:
-                METRICS["errors_total"] += 1
+                METRICS["error_total"] += 1
                 logger.error(
                     "%s %s status=500 latency_ms=%.2f",
-                    request.method,
-                    request.url.path,
-                    elapsed_ms,
+                    request.method, request.url.path, elapsed_ms,
                 )
             elif response is not None:
                 status = response.status_code
+
                 if status >= 500:
                     level = logging.ERROR
-                    METRICS["errors_total"] += 1
+                    METRICS["error_total"] += 1
                 elif status >= 400:
                     level = logging.WARNING
-                    METRICS["errors_total"] += 1
+                    METRICS["error_total"] += 1
                 else:
                     level = logging.INFO
+                    METRICS["success_total"] += 1
+
+                if getattr(request.state, "log_level", None) == "WARNING":
+                    level = logging.WARNING
+
                 logger.log(
                     level,
                     "%s %s status=%s latency_ms=%.2f",
-                    request.method,
-                    request.url.path,
-                    status,
-                    elapsed_ms,
+                    request.method, request.url.path, status, elapsed_ms,
                 )
+
+            if getattr(request.state, "human_review", False):
+                METRICS["human_review_total"] += 1
+
+
 # DOMAIN VALIDATION
+
 def validate_transaction_domain(txn: Txn):
     """
     Domain/range violations must return HTTP 400.
@@ -192,6 +222,7 @@ def validate_transaction_domain(txn: Txn):
                 "field": "payment_mode",
             },
         )
+
     if txn.txn_count_last_24h < 0:
         raise HTTPException(
             status_code=400,
@@ -200,6 +231,7 @@ def validate_transaction_domain(txn: Txn):
                 "field": "txn_count_last_24h",
             },
         )
+
     if txn.avg_amount_30d_inr <= 0:
         raise HTTPException(
             status_code=400,
@@ -208,6 +240,7 @@ def validate_transaction_domain(txn: Txn):
                 "field": "avg_amount_30d_inr",
             },
         )
+
     if txn.distance_from_home_km is not None and txn.distance_from_home_km < 0:
         raise HTTPException(
             status_code=400,
@@ -216,6 +249,7 @@ def validate_transaction_domain(txn: Txn):
                 "field": "distance_from_home_km",
             },
         )
+
     if txn.is_new_device not in {0, 1}:
         raise HTTPException(
             status_code=400,
@@ -224,12 +258,16 @@ def validate_transaction_domain(txn: Txn):
                 "field": "is_new_device",
             },
         )
+
+
 # MODEL INPUT PREPARATION
+
 def transaction_to_features(txn: Txn):
     """
     Convert one API transaction into the exact feature structure
     used by the trained model.
     """
+
     row = {
         "txn_id": txn.txn_id,
         "customer_id": txn.customer_id,
@@ -244,9 +282,12 @@ def transaction_to_features(txn: Txn):
         "is_new_device": txn.is_new_device,
         "account_age_days": txn.account_age_days,
     }
+
     df = pd.DataFrame([row])
+
     # Part A feature engineering
     df = add_features(df)
+
     # Remove identifiers.
     df = df.drop(
         columns=[
@@ -255,6 +296,7 @@ def transaction_to_features(txn: Txn):
         ],
         errors="ignore",
     )
+
     # One-hot encoding.
     df = pd.get_dummies(
         df,
@@ -265,18 +307,28 @@ def transaction_to_features(txn: Txn):
         ],
         dtype=int,
     )
+
+    # Make sure every training column exists.
     df = df.reindex(
         columns=MODEL_COLUMNS,
         fill_value=0,
     )
+
+    # Training-only median.
     if "distance_from_home_km" in df.columns:
         df["distance_from_home_km"] = (
             df["distance_from_home_km"]
             .fillna(TRAINING_MEDIAN)
         )
+
+    # Final safety check.
     df = df.fillna(0)
+
     return df
+
+
 # SCORE TRANSACTION
+
 def score_transaction(txn):
     X = transaction_to_features(txn)
 
@@ -324,34 +376,47 @@ def health():
     return {
         "status": "ok"
     }
+
+
 # POST /score
+
 @app.post("/score")
-def score(txn: Txn):
+def score(txn: Txn, request: Request):
     validate_transaction_domain(txn)
-    return score_transaction(txn)
+    result = score_transaction(txn)
+    request.state.human_review = result["human_review"]
+
+    if txn.amount_inr >= 100000 and txn.is_new_device == 1:
+        request.state.log_level = "WARNING"
+
+    return result
+
+
 # POST /case
+
 @app.post("/case")
-def case(txn: CaseIn):
+def case(txn: CaseIn, request: Request):
     validate_transaction_domain(txn)
 
-    result = score_transaction(txn)
     # First score the transaction.
-    score_result = score_transaction(
-        txn
-    )
+    score_result = score_transaction(txn)
 
     flagged = score_result["flagged"]
     
     # Benign transaction
     
     if not flagged:
+        request.state.human_review = score_result["human_review"]
 
         return {
             **score_result,
             "case_note": None,
             "attempts": 0,
             "safe_default": False,
+            "guardrail_override": False,
         }
+
+    # Flagged transaction
 
     fraud_probability = score_result[
         "fraud_probability"
@@ -376,6 +441,9 @@ def case(txn: CaseIn):
         )
 
     # Case-level guardrail
+    # Any approve action for a flagged payment must be
+    # overridden.
+
     case_note = result["case_note"]
     override = result.get(
         "override",
@@ -388,36 +456,60 @@ def case(txn: CaseIn):
             case_note["recommended_action"]
             == "approve"
         ):
+
             case_note[
                 "recommended_action"
             ] = "hold_for_review"
 
             override = True
+
+    # If policy retrieval failed, keep the transaction
+    # on human review because it is already flagged.
+
+    request.state.human_review = score_result["human_review"]
+
+    if result["safe_default"]:
+        request.state.log_level = "WARNING"
+
     return {
         **score_result,
         "case_note": case_note,
         "attempts": result["attempts"],
         "safe_default": result["safe_default"],
-        "override": override,
+        "guardrail_override": override,
     }
+
+
 # GET /metrics
+
 @app.get("/metrics")
 def metrics():
+    requests_total = METRICS["requests_total"]
+    success_total = METRICS["success_total"]
+    error_total = METRICS["error_total"]
+    human_review_total = METRICS["human_review_total"]
 
-    if METRICS["latency_count"] > 0:
+    if requests_total:
+        success_rate = success_total / requests_total
+        error_rate = error_total / requests_total
+        human_review_rate = human_review_total / requests_total
+    else:
+        success_rate = error_rate = human_review_rate = 0.0
+
+    if METRICS["latency_count"]:
         avg_latency = (
-            METRICS["latency_total_ms"]
-            / METRICS["latency_count"]
+            METRICS["latency_total_ms"] / METRICS["latency_count"]
         )
     else:
         avg_latency = 0.0
 
     return {
-        "requests_total": METRICS["requests_total"],
-        "post_requests": METRICS["post_requests"],
-        "errors_total": METRICS["errors_total"],
-        "average_latency_ms": round(
-            avg_latency,
-            3,
-        ),
+        "requests_total": requests_total,
+        "success_total": success_total,
+        "error_total": error_total,
+        "success_rate": round(success_rate, 3),
+        "error_rate": round(error_rate, 3),
+        "human_review_total": human_review_total,
+        "human_review_rate": round(human_review_rate, 3),
+        "avg_latency_ms": round(avg_latency, 3),
     }
