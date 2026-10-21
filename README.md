@@ -45,6 +45,16 @@ razorpay-merchant-risk-desk/
 - Logistic Regression
 - Random Forest
 
+# Install karne ka command
+G:\project ke andar virtual environment activate karke:
+cd /d G:\project
+.venv\Scripts\activate
+pip install -r Requirement.txt
+
+or do it indevidualy.
+
+python -c "import fastapi, uvicorn, pydantic, requests, pandas, sklearn; print('All requirements OK')"
+
 ## Part A — Data Preparation
 
 `prepare.py` provides:
